@@ -50,9 +50,9 @@ if ($crisisFilter->isCrisis($message)) {
 
     echo json_encode([
         'conversation_id' => $conversationId,
-        'reply'            => $safeReply,
-        'crisis'           => true,
-        'recommendations'  => [],
+        'reply' => $safeReply,
+        'crisis' => true,
+        'recommendations' => [],
     ]);
     exit;
 }
@@ -67,10 +67,92 @@ $conditions = [];
 $recommendations = [];
 $engine = new RecommendationEngine($pdo);
 
+function detectConditionFromMessage(string $message, string $apiKey, string $model): ?string
+{
+    $validConditions = ['academic', 'health', 'schedule', 'social', 'financial', 'sleep'];
+
+    $payload = json_encode([
+        'model'       => $model,
+        'temperature' => 0,         // deterministic — we want classification, not creativity
+        'max_tokens'  => 10,        // we only need one word back
+        'messages'    => [
+            [
+                'role'    => 'system',
+                'content' => "You are a classifier. Given a student's message, respond with EXACTLY one word "
+                           . "from this list that best describes the student's concern: "
+                           . "academic, health, schedule, social, financial, sleep. "
+                           . "If the message has no clear concern related to student wellbeing, respond with: none. "
+                           . "No explanation. No punctuation. One word only."
+            ],
+            [
+                'role'    => 'user',
+                'content' => $message
+            ]
+        ]
+    ]);
+
+    $ch = curl_init('https://api.groq.com/openai/v1/chat/completions');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiKey,
+        ],
+        CURLOPT_TIMEOUT        => 8,
+    ]);
+
+    $response = curl_exec($ch);
+    curl_close($ch);
+
+    if (!$response) return null;
+
+    $data   = json_decode($response, true);
+    $result = strtolower(trim($data['choices'][0]['message']['content'] ?? ''));
+
+    return in_array($result, $validConditions) ? $result : null;
+}
+
+$isFirstMessage = false;
+if ($conversationId) {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM messages WHERE conversation_id = ?");
+    $stmt->execute([$conversationId]);
+    $messageCount = (int) $stmt->fetchColumn();
+    $isFirstMessage = $messageCount === 0;
+}
+
 if ($latestCheckin) {
-    $evaluator = new ConditionEvaluator();
-    $conditions = $evaluator->evaluate($latestCheckin);
-    $recommendations = $engine->getRecommendations($conditions);
+    $evaluator  = new ConditionEvaluator();
+    $allConditions = $evaluator->evaluate($latestCheckin);
+
+    $severityRank = ['severe' => 3, 'moderate' => 2, 'mild' => 1];
+
+    if ($isFirstMessage) {
+        // First reply: show recs for the single worst condition from check-in
+        $topCondition = null;
+        $topRank = 0;
+        foreach ($allConditions as $type => $severity) {
+            if (($severityRank[$severity] ?? 0) > $topRank) {
+                $topCondition = [$type => $severity];
+                $topRank = $severityRank[$severity];
+            }
+        }
+        if ($topCondition) {
+            $recommendations = $engine->getRecommendations($topCondition, 2);
+        }
+    } else {
+        // Follow-up replies: ask the LLM to classify the condition — no keyword lists
+        $detected = detectConditionFromMessage($message, GROQ_API_KEY, GROQ_MODEL);
+        if ($detected && isset($allConditions[$detected])) {
+            // Condition was both detected in message AND flagged in check-in
+            $recommendations = $engine->getRecommendations([$detected => $allConditions[$detected]], 2);
+        } elseif ($detected) {
+            // Condition detected in message but not in check-in — use moderate as default
+            $recommendations = $engine->getRecommendations([$detected => 'moderate'], 2);
+        }
+        // No match = no chips, conversation flows naturally
+    }
 }
 
 $stmt = $pdo->prepare(
@@ -82,7 +164,7 @@ $recentMessages = array_reverse($stmt->fetchAll());
 $groqMessages = [['role' => 'system', 'content' => buildSystemPrompt($conditions, $recommendations)]];
 foreach ($recentMessages as $m) {
     $groqMessages[] = [
-        'role'    => $m['sender'] === 'student' ? 'user' : 'assistant',
+        'role' => $m['sender'] === 'student' ? 'user' : 'assistant',
         'content' => $m['message_text'],
     ];
 }
@@ -112,9 +194,9 @@ if (!empty($conditions)) {
 
 echo json_encode([
     'conversation_id' => $conversationId,
-    'reply'            => $reply,
-    'crisis'           => false,
-    'recommendations'  => $flatRecommendations,
+    'reply' => $reply,
+    'crisis' => false,
+    'recommendations' => $flatRecommendations,
 ]);
 
 function saveMessage(PDO $pdo, int $conversationId, string $sender, string $text, bool $flagged, string $recIds = ''): void
@@ -128,12 +210,23 @@ function saveMessage(PDO $pdo, int $conversationId, string $sender, string $text
 
 function buildSystemPrompt(array $conditions, array $recommendations): string
 {
-    $base = "You are a supportive academic guidance assistant for PUP students. "
-          . "Listen, ask clarifying questions, validate feelings, and offer practical next steps "
-          . "the way a real campus counselor would. You are not a licensed therapist and cannot "
-          . "diagnose mental health conditions. Keep replies to 3-6 sentences, warm and non-judgmental. "
-          . "If recommendations are listed below, weave at most 2 into your reply naturally as "
-          . "suggestions, never as a list dump. For personal topics, end with one open follow-up question.";
+    $base = "You are a Guidance Counselor AI Chatbot for PUP (Polytechnic University of the Philippines) students. "
+      . "Your sole purpose is to support students with concerns related to their academic life, mental and emotional "
+      . "wellbeing, peer and group relationships, workload and schedule management, financial stress, and campus "
+      . "resources. You listen with empathy, ask clarifying questions, validate feelings, and offer practical "
+      . "next steps the way a real campus counselor would. "
+      . "You are NOT a general-purpose assistant. If a student asks something outside your scope — such as "
+      . "homework answers, trivia, translation requests, technical help, or anything unrelated to student "
+      . "wellbeing and academic life — respond warmly but redirect them. Example: 'That's a bit outside what "
+      . "I can help with, but I'm here if anything about your studies, workload, or wellbeing is on your mind.' "
+      . "You are not a licensed therapist and cannot diagnose mental health conditions. "
+      . "Keep replies to 3-5 sentences, warm and non-judgmental. "
+      . "If recommendations are listed below, introduce them warmly as something you noticed from "
+      . "the student's check-in — not as a prescription. Weave at most 1 into your opening reply naturally. "
+      . "For follow-up messages with no recommendations listed, do NOT invent suggestions unprompted — "
+      . "focus on understanding the student's situation first. "
+      . "Always respond in the same language or mix the student uses — if they write in Taglish, respond in Taglish. "
+      . "End personal topic replies with one open follow-up question.";
 
     if (!empty($conditions)) {
         $base .= "\n\nDetected conditions: " . json_encode($conditions);
@@ -141,7 +234,8 @@ function buildSystemPrompt(array $conditions, array $recommendations): string
     if (!empty($recommendations)) {
         $flat = [];
         foreach ($recommendations as $list) {
-            foreach ($list as $rec) $flat[] = $rec['activity_text'];
+            foreach ($list as $rec)
+                $flat[] = $rec['activity_text'];
         }
         $base .= "\nSuggested resources to consider mentioning: " . json_encode($flat);
     }
