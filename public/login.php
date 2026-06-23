@@ -36,6 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'expires'  => strtotime('+6 months'),
                 'path'     => '/',
                 'httponly' => true,
+                'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
                 'samesite' => 'Strict',
             ]);
         }

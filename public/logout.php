@@ -4,13 +4,25 @@ require_once __DIR__ . '/../config/db.php';
 
 // Delete the remember-me token from DB so it can't be reused after logout
 if (!empty($_COOKIE['remember_me'])) {
-    [$cookieStudentId, $cookieToken] = explode(':', $_COOKIE['remember_me'], 2) + [null, null];
-    $tokenHash = hash('sha256', $cookieToken ?? '');
+    $parts = explode(':', $_COOKIE['remember_me'], 2);
+    $cookieStudentId = $parts[0] ?? null;
+    $cookieToken     = $parts[1] ?? null;
 
-    $stmt = $pdo->prepare("DELETE FROM remember_tokens WHERE token_hash = ? AND student_id = ?");
-    $stmt->execute([$tokenHash, (int) $cookieStudentId]);
+    if ($cookieStudentId !== null && $cookieToken !== null) {
+        $tokenHash = hash('sha256', $cookieToken);
+        $stmt = $pdo->prepare("DELETE FROM remember_tokens WHERE token_hash = ? AND student_id = ?");
+        $stmt->execute([$tokenHash, (int) $cookieStudentId]);
+    }
 
-    setcookie('remember_me', '', ['expires' => time() - 3600, 'path' => '/', 'httponly' => true, 'samesite' => 'Strict']);
+    // Must use the same flags as setcookie() in login.php so the browser
+    // actually overwrites/removes the existing cookie.
+    setcookie('remember_me', '', [
+        'expires'  => time() - 3600,
+        'path'     => '/',
+        'httponly' => true,
+        'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'samesite' => 'Strict',
+    ]);
 }
 
 session_unset();

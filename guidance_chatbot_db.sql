@@ -393,3 +393,20 @@ COMMIT;
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+
+-- Migration: add remember_tokens table to guidance_chatbot_db
+-- Run this once in phpMyAdmin > guidance_chatbot_db > SQL tab
+
+CREATE TABLE `remember_tokens` (
+  `id`         int(11)      NOT NULL AUTO_INCREMENT,
+  `student_id` int(11)      NOT NULL,
+  `token_hash` char(64)     NOT NULL,
+  `expires_at` datetime     NOT NULL,
+  `created_at` timestamp    NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_token_hash` (`token_hash`),
+  KEY `idx_student_id` (`student_id`),
+  CONSTRAINT `remember_tokens_ibfk_1`
+    FOREIGN KEY (`student_id`) REFERENCES `students` (`student_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

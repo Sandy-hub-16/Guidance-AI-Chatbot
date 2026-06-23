@@ -6,8 +6,27 @@ if (!isset($_SESSION['student_id'])) {
     if (!empty($_COOKIE['remember_me'])) {
         require_once __DIR__ . '/db.php';
 
-        [$cookieStudentId, $cookieToken] = explode(':', $_COOKIE['remember_me'], 2) + [null, null];
-        $tokenHash = hash('sha256', $cookieToken ?? '');
+        $parts           = explode(':', $_COOKIE['remember_me'], 2);
+        $cookieStudentId = $parts[0] ?? null;
+        $cookieToken     = $parts[1] ?? null;
+
+        // Cookie flags must match login.php exactly so the browser honours them
+        $secureCookie = [
+            'expires'  => time() - 3600,
+            'path'     => '/',
+            'httponly' => true,
+            'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+            'samesite' => 'Strict',
+        ];
+
+        // Reject malformed cookies immediately (missing either part)
+        if ($cookieStudentId === null || $cookieToken === null) {
+            setcookie('remember_me', '', $secureCookie);
+            header('Location: login.php');
+            exit;
+        }
+
+        $tokenHash = hash('sha256', $cookieToken);
 
         $stmt = $pdo->prepare(
             "SELECT rt.student_id, s.full_name
@@ -27,7 +46,7 @@ if (!isset($_SESSION['student_id'])) {
             $_SESSION['student_name'] = $row['full_name'];
         } else {
             // Invalid or expired token — clean up and send to login
-            setcookie('remember_me', '', ['expires' => time() - 3600, 'path' => '/']);
+            setcookie('remember_me', '', $secureCookie);
             header('Location: login.php');
             exit;
         }
